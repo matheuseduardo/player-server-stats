@@ -19,9 +19,15 @@ public Plugin myinfo =
 // Handle para a conexão com o banco de dados
 Handle g_hDatabase = INVALID_HANDLE;
 
+// ConVar para definir o limite de tempo (em segundos)
+ConVar g_cvarReconnectThreshold;
+
 // Função chamada quando o plugin é carregado
 public void OnPluginStart()
 {
+    // Registra a ConVar
+    g_cvarReconnectThreshold = CreateConVar("sm_reconnect_threshold", "30", "Tempo máximo (em segundos) para considerar uma reconexão rápida.");
+    
     char error[256];
     g_hDatabase = SQLite_UseDatabase("player_stats.db", error, sizeof(error));
     if (g_hDatabase == INVALID_HANDLE)
@@ -60,7 +66,6 @@ public void OnClientConnected(int client)
     DBResultSet results = SQL_Query(g_hDatabase, "SELECT id FROM `players` WHERE steamid = '%s';", steamid);
     if (results != null && results.RowCount > 0)
     {
-        // Jogador já existe, obtém o ID
         playerId = results.FetchInt(0, "id");
     }
     else
@@ -81,6 +86,36 @@ public void OnClientConnected(int client)
 
         playerId = SQL_GetInsertId(g_hDatabase);
         PrintToServer("[Player Server Stats] Novo jogador registrado com ID %d.", playerId);
+    }
+
+    // Verifica a última sessão do jogador
+    results = SQL_Query(g_hDatabase, "SELECT id, end_time FROM `sessions` WHERE player_id = %d ORDER BY start_time DESC LIMIT 1;", playerId);
+    if (results != null && results.RowCount > 0)
+    {
+        int sessionId = results.FetchInt(0, "id");
+        int lastEndTime = results.FetchInt(0, "end_time");
+
+        // Obtém o limite de tempo da ConVar
+        int threshold = GetConVarInt(g_cvarReconnectThreshold);
+
+        // Se a última desconexão foi recente, reativa a sessão existente
+        if (lastEndTime > 0 && GetTime() - lastEndTime <= threshold)
+        {
+            char query[512];
+            Format(query, sizeof(query), "UPDATE `sessions` SET end_time = NULL WHERE id = %d;", sessionId);
+
+            bool execOk = SQL_FastQuery(g_hDatabase, query);
+            if (!execOk)
+            {
+                char error[256];
+                SQL_GetError(g_hDatabase, error, sizeof(error));
+                PrintToServer("Falha ao reativar sessão: %s", error);
+                return;
+            }
+
+            PrintToServer("[Player Server Stats] Sessão reativada para jogador ID %d.", playerId);
+            return;
+        }
     }
 
     // Insere uma nova sessão na tabela 'sessions'
